@@ -1,0 +1,19 @@
+# Exclude Python build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / Create executables
+build/
+dist/
+*.spec
+
+# User Data & Config (Do not commit personal data)
+journal.txt
+config.json
+
+# Environment
+.env
+.venv
+env/
+venv/
