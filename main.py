@@ -4,11 +4,16 @@ import os
 import datetime
 import re
 import tkinter as tk
+from tkinter import messagebox, scrolledtext, font, filedialog
+from PIL import Image, ImageTk # Resim işleme için Pillow (zaten yüklü olabilir, yoksa pip install gerekebilir)
+import shutil
+import uuid 
 from tkinter import messagebox, scrolledtext, font
 
 # --- Configuration & Theme ---
 CONFIG_FILE = "config.json"
 JOURNAL_FILE = "journal.txt"
+IMAGES_DIR = "journal_images" 
 
 class Theme:
     BG_COLOR = "#2C3E50"        # Dark Blue/Gray
@@ -76,8 +81,14 @@ class JournalApp:
     def __init__(self, root):
         self.root = root
         self.current_entry_index = None # Track which entry is being edited
+        self.image_refs = [] # Keep references to images to prevent garbage collection
+        
+        # Resim klasörünü oluştur
+        if not os.path.exists(IMAGES_DIR):
+            os.makedirs(IMAGES_DIR)
+
         self.setup_window()
-        self.check_status()
+        self.check_status() 
 
     def setup_window(self):
         self.root.title("Kişisel Günlük Profesyonel")
@@ -242,6 +253,12 @@ class JournalApp:
         self.delete_btn = self.create_button(self.btn_frame, "🗑️ Sil", self.delete_entry, Theme.ERROR_COLOR)
         self.save_btn = self.create_button(self.btn_frame, "💾 Kaydet", self.save_entry, Theme.ACCENT_COLOR)
         self.update_btn = self.create_button(self.btn_frame, "💾 Güncelle", self.update_entry, Theme.SUCCESS_COLOR)
+        
+        # Resim Ekle Butonu - Ayrı bir yerde dursun (örneğin başlıkta veya altta)
+        self.add_img_btn = tk.Button(self.header_btn_frame, text="📷 Fotoğraf Ekle", command=self.add_image,
+                  bg=Theme.BG_COLOR, fg=Theme.ACCENT_COLOR, bd=0, cursor="hand2",
+                  font=(Theme.FONT_FAMILY, 10, "bold"))
+        self.add_img_btn.pack(side="left", padx=5) 
 
         # Initial Load
         self.refresh_history()
@@ -399,22 +416,28 @@ class JournalApp:
         self.journal_text.config(state="normal")
         self.journal_text.delete("1.0", tk.END)
         self.journal_text.insert("1.0", entry['content'])
+        
+        # Görselleri Yükle
+        self.render_images(entry['content'])
+        
         self.journal_text.config(state="disabled", bg=Theme.INPUT_BG)
         
         # Button State: Show Edit/Delete, Hide Save/Update
         self.save_btn.pack_forget()
         self.update_btn.pack_forget()
+        self.add_img_btn.pack_forget() # Resim ekleme butonu gizle (düzenleme modunda açacağız)
         self.delete_btn.pack(side="right", padx=(0, 10))
         self.edit_btn.pack(side="right")
         
-        self.status_label.config(text="Geçmiş görüntüleniyor (Düzenlemek için butona basın)", fg="#F39C12")
+        self.status_label.config(text="Geçmiş görüntüleniyor (Düzenlemek için butona basın)", fg="#F39C12") 
 
     def enable_edit_mode(self):
         self.journal_text.config(state="normal", bg="#FFF8DC") # Slightly different color for edit
         self.edit_btn.pack_forget()
         self.delete_btn.pack_forget() # Hide delete while editing
         self.update_btn.pack(side="right")
-        self.status_label.config(text="✏️ Düzenleme modu aktif", fg=Theme.WARNING_COLOR)
+        self.add_img_btn.pack(side="left", padx=5) # Resim eklemeyi göster
+        self.status_label.config(text="✏️ Düzenleme modu aktif", fg=Theme.WARNING_COLOR) 
 
     def prepare_new_entry(self):
         # Refresh entries to ensure we have the latest data
@@ -454,11 +477,13 @@ class JournalApp:
         self.history_listbox.selection_clear(0, tk.END)
         
         # Button State: Show Save, Hide Edit/Update/Delete
+        # Button State: Show Save, Hide Edit/Update/Delete
         self.edit_btn.pack_forget()
         self.update_btn.pack_forget()
         self.delete_btn.pack_forget()
+        self.add_img_btn.pack(side="left", padx=5) # Yeni kayıtta göster
         if not self.save_btn.winfo_ismapped():
-            self.save_btn.pack(side="right")
+            self.save_btn.pack(side="right") 
         
         self.status_label.config(text="Yazmaya başlayın...", fg="#95a5a6")
 
@@ -573,6 +598,102 @@ class JournalApp:
                 messagebox.showerror("Hata", f"Kaydedilemedi: {e}", parent=dialog)
         
         tk.Button(dialog, text="Kaydet", command=save_new, bg=Theme.SUCCESS_COLOR, fg="white").pack(pady=20)
+
+    # --- Image Handling ---
+    def add_image(self):
+        file_path = filedialog.askopenfilename(
+            filetypes=[("Resim Dosyaları", "*.png;*.jpg;*.jpeg;*.gif;*.bmp")]
+        )
+        if not file_path: return
+
+        try:
+            # Generate unique filename
+            ext = os.path.splitext(file_path)[1]
+            new_filename = f"img_{uuid.uuid4().hex[:8]}{ext}"
+            target_path = os.path.join(IMAGES_DIR, new_filename)
+            
+            # Copy to images dir
+            shutil.copy2(file_path, target_path)
+            
+            # Insert tag into text
+            tag = f"\n<<IMG:{new_filename}>>\n"
+            self.journal_text.insert(tk.INSERT, tag)
+            
+            # Show image immediately (preview)
+            self.insert_image_to_text(target_path, tk.INSERT)
+            
+        except Exception as e:
+            messagebox.showerror("Hata", f"Resim eklenirken hata: {e}", parent=self.root)
+
+    def render_images(self, content):
+        """Metin içindeki <<IMG:..>> etiketlerini bulur ve yerlerine görsel koyar."""
+        # Bu işlem biraz karmaşık çünkü metin widget'ı karakter bazlı çalışır.
+        # Basit bir yaklaşım olarak: regex ile bulup, metin indeksini hesaplayıp oraya resim koyacağız.
+        pass # İlk yüklemede, metni zaten insert ettik. Şimdi üzerinden geçip resimleri render edelim.
+        
+        # Önce mevcut resim referanslarını temizle
+        self.image_refs.clear()
+        
+        # İçerikteki tüm image taglarını bul
+        # Not: Tkinter Text widget'ında arama yapmak daha güvenilir çünkü satır numaraları değişebilir.
+        
+        start_pos = "1.0"
+        while True:
+            # Regex: <<IMG:dosya_adi>>
+            pos = self.journal_text.search(r"<<IMG:.*?>>", start_pos, stopindex=tk.END, regexp=True)
+            if not pos: break
+            
+            # Tagın bitişini bul
+            line, col = pos.split('.')
+            end_pos = f"{line}.{int(col)+100}" # Tahmini bir uzunluk
+            # Tam metni alıp parse edelim
+            # Daha güvenli yol: search ile tam eşleşmeyi bulmak zor olabilir çünkü regex greedy olabilir.
+            # Basit split ile yapalım:
+            
+            # Tag içeriğini al
+            # <<IMG:dosya.png>> -> 19 karakter vs.
+            # Manuel parse:
+            txt_content = self.journal_text.get(pos, f"{pos} lineend") 
+            match = re.search(r"<<IMG:(.*?)>>", txt_content)
+            if match:
+                img_filename = match.group(1)
+                full_tag = match.group(0)
+                tag_end_index = f"{pos}+{len(full_tag)}c"
+                
+                img_path = os.path.join(IMAGES_DIR, img_filename)
+                
+                if os.path.exists(img_path):
+                    # Resmi yükle
+                    self.insert_image_to_text(img_path, tag_end_index)
+                
+                # Bir sonraki arama için pozisyonu güncelle
+                start_pos = tag_end_index
+            else:
+                # Eşleşme yoksa (hatalı tag), bir karakter ilerle
+                start_pos = f"{pos}+1c"
+
+    def insert_image_to_text(self, img_path, index):
+        try:
+            # Resmi boyutlandır (Max genişlik: 400px - performans için)
+            pil_img = Image.open(img_path)
+            
+            # Aspect ratio koru
+            base_width = 400
+            if pil_img.width > base_width:
+                w_percent = (base_width / float(pil_img.size[0]))
+                h_size = int((float(pil_img.size[1]) * float(w_percent)))
+                pil_img = pil_img.resize((base_width, h_size), Image.Resampling.LANCZOS)
+            
+            tk_img = ImageTk.PhotoImage(pil_img)
+            
+            # Referansı sakla (yoksa garbage collector siler ve resim görünmez)
+            self.image_refs.append(tk_img)
+            
+            # Text widget'a ekle
+            self.journal_text.image_create(index, image=tk_img, padx=10, pady=10)
+            
+        except Exception as e:
+            print(f"Resim yükleme hatası: {e}") 
 
 def main():
     try:
