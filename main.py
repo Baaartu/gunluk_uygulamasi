@@ -4,7 +4,7 @@ import os
 import datetime
 import re
 import tkinter as tk
-from tkinter import messagebox, scrolledtext, font, filedialog
+from tkinter import messagebox, scrolledtext, font, filedialog, simpledialog
 from PIL import Image, ImageTk # Resim işleme için Pillow (zaten yüklü olabilir, yoksa pip install gerekebilir)
 import shutil
 import uuid 
@@ -418,7 +418,7 @@ class JournalApp:
         self.journal_text.insert("1.0", entry['content'])
         
         # Görselleri Yükle
-        self.render_images(entry['content'])
+        self.render_images(clear_refs=True)
         
         self.journal_text.config(state="disabled", bg=Theme.INPUT_BG)
         
@@ -615,85 +615,159 @@ class JournalApp:
             # Copy to images dir
             shutil.copy2(file_path, target_path)
             
-            # Insert tag into text
-            tag = f"\n<<IMG:{new_filename}>>\n"
+            # Insert tag with default width 400
+            tag = f"\n<<IMG:{new_filename}|400>>\n"
             self.journal_text.insert(tk.INSERT, tag)
             
-            # Show image immediately (preview)
-            self.insert_image_to_text(target_path, tk.INSERT)
+            # Render newly added content without clearing existing images
+            self.render_images(clear_refs=False)
             
         except Exception as e:
             messagebox.showerror("Hata", f"Resim eklenirken hata: {e}", parent=self.root)
 
-    def render_images(self, content):
-        """Metin içindeki <<IMG:..>> etiketlerini bulur ve yerlerine görsel koyar."""
-        # Bu işlem biraz karmaşık çünkü metin widget'ı karakter bazlı çalışır.
-        # Basit bir yaklaşım olarak: regex ile bulup, metin indeksini hesaplayıp oraya resim koyacağız.
-        pass # İlk yüklemede, metni zaten insert ettik. Şimdi üzerinden geçip resimleri render edelim.
-        
-        # Önce mevcut resim referanslarını temizle
-        self.image_refs.clear()
-        
-        # İçerikteki tüm image taglarını bul
-        # Not: Tkinter Text widget'ında arama yapmak daha güvenilir çünkü satır numaraları değişebilir.
-        
+    def render_images(self, content=None, clear_refs=False):
+        """Metin içindeki <<IMG:..>> etiketlerini bulur, kodu gizler ve resmi gösterir."""
+        if clear_refs:
+            self.image_refs.clear()
+
+        # Unlock widget temporarily
+        original_state = self.journal_text.cget("state")
+        self.journal_text.config(state="normal")
+
         start_pos = "1.0"
         while True:
-            # Regex: <<IMG:dosya_adi>>
-            pos = self.journal_text.search(r"<<IMG:.*?>>", start_pos, stopindex=tk.END, regexp=True)
+            # Search for start of tag
+            pos = self.journal_text.search(r"<<IMG:", start_pos, stopindex=tk.END)
             if not pos: break
             
-            # Tagın bitişini bul
-            line, col = pos.split('.')
-            end_pos = f"{line}.{int(col)+100}" # Tahmini bir uzunluk
-            # Tam metni alıp parse edelim
-            # Daha güvenli yol: search ile tam eşleşmeyi bulmak zor olabilir çünkü regex greedy olabilir.
-            # Basit split ile yapalım:
+            # Check if processed (if tag has our processing mark)
+            tags = self.journal_text.tag_names(pos)
+            if any(t.startswith("img_processed_") for t in tags):
+                start_pos = f"{pos}+1c"
+                continue
             
-            # Tag içeriğini al
-            # <<IMG:dosya.png>> -> 19 karakter vs.
-            # Manuel parse:
-            txt_content = self.journal_text.get(pos, f"{pos} lineend") 
-            match = re.search(r"<<IMG:(.*?)>>", txt_content)
+            # Get content to find end of tag
+            chunk = self.journal_text.get(pos, f"{pos} lineend + 100c")
+            match = re.match(r"(<<IMG:(.*?)>>)", chunk)
+            
             if match:
-                img_filename = match.group(1)
-                full_tag = match.group(0)
-                tag_end_index = f"{pos}+{len(full_tag)}c"
+                full_tag = match.group(1)
+                inner = match.group(2)
                 
-                img_path = os.path.join(IMAGES_DIR, img_filename)
+                width = 400
+                filename = inner
+                if "|" in inner:
+                    try:
+                        parts = inner.split("|")
+                        filename = parts[0] 
+                        width = int(parts[1])
+                    except: pass
+                
+                img_path = os.path.join(IMAGES_DIR, filename)
+                tag_end = f"{pos}+{len(full_tag)}c"
                 
                 if os.path.exists(img_path):
-                    # Resmi yükle
-                    self.insert_image_to_text(img_path, tag_end_index)
-                
-                # Bir sonraki arama için pozisyonu güncelle
-                start_pos = tag_end_index
+                    # Unique ID for this image instance
+                    uid = uuid.uuid4().hex[:8]
+                    group_tag = f"img_processed_{uid}"
+                    
+                    # 1. Hide the code text using 'elide'
+                    self.journal_text.tag_add(group_tag, pos, tag_end)
+                    self.journal_text.tag_add("hidden_code", pos, tag_end)
+                    self.journal_text.tag_config("hidden_code", elide=True)
+                    
+                    # 2. Insert image at the end of the hidden tag
+                    self.insert_image_to_text(img_path, width, tag_end, group_tag)
+                    
+                    start_pos = tag_end
+                else:
+                    # File not found
+                    start_pos = tag_end
             else:
-                # Eşleşme yoksa (hatalı tag), bir karakter ilerle
                 start_pos = f"{pos}+1c"
+        
+        # Restore state
+        self.journal_text.config(state=original_state)
 
-    def insert_image_to_text(self, img_path, index):
+    def insert_image_to_text(self, img_path, width, index, group_tag):
         try:
-            # Resmi boyutlandır (Max genişlik: 400px - performans için)
             pil_img = Image.open(img_path)
             
-            # Aspect ratio koru
-            base_width = 400
-            if pil_img.width > base_width:
-                w_percent = (base_width / float(pil_img.size[0]))
-                h_size = int((float(pil_img.size[1]) * float(w_percent)))
-                pil_img = pil_img.resize((base_width, h_size), Image.Resampling.LANCZOS)
+            # Keep Aspect Ratio
+            w_percent = (width / float(pil_img.size[0]))
+            h_size = int((float(pil_img.size[1]) * float(w_percent)))
+            pil_img = pil_img.resize((width, h_size), Image.Resampling.LANCZOS)
             
             tk_img = ImageTk.PhotoImage(pil_img)
-            
-            # Referansı sakla (yoksa garbage collector siler ve resim görünmez)
             self.image_refs.append(tk_img)
             
-            # Text widget'a ekle
-            self.journal_text.image_create(index, image=tk_img, padx=10, pady=10)
+            # Create image in text widget
+            self.journal_text.image_create(index, image=tk_img, padx=5, pady=5)
+            
+            # Apply group tag to the image too (it occupies 1 char)
+            self.journal_text.tag_add(group_tag, index, f"{index}+1c")
+            
+            # Right-click binding for context menu
+            self.journal_text.tag_bind(group_tag, "<Button-3>", 
+                                     lambda e, t=group_tag: self.show_image_menu(e, t))
             
         except Exception as e:
-            print(f"Resim yükleme hatası: {e}") 
+            print(f"Resim yükleme hatası: {e}")
+
+    def show_image_menu(self, event, group_tag):
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="📏 Boyutu Değiştir", command=lambda: self.resize_image_action(group_tag))
+        menu.add_separator()
+        menu.add_command(label="🗑️ Resmi Sil", command=lambda: self.delete_image_action(group_tag))
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def resize_image_action(self, group_tag):
+        ranges = self.journal_text.tag_ranges(group_tag)
+        if not ranges: return
+        start, end = ranges[0], ranges[1]
+        
+        # Extract hidden text (excluding the image char at the end)
+        text_content = self.journal_text.get(start, f"{end}-1c")
+        
+        # Parse current filename/width
+        match = re.search(r"<<IMG:(.*?)>>", text_content)
+        current_width = 400
+        filename = ""
+        if match:
+            inner = match.group(1)
+            filename = inner.split("|")[0]
+            if "|" in inner:
+                try: current_width = int(inner.split("|")[1])
+                except: pass
+        
+        # Ask for new width
+        new_width = simpledialog.askinteger("Resim Boyutu", "Yeni genişlik (px):", 
+                                          initialvalue=current_width, minvalue=50, maxvalue=1000, parent=self.root)
+        if not new_width: return
+        
+        # Determine edit state to unlock widget
+        was_disabled = self.journal_text.cget("state") == "disabled"
+        self.journal_text.config(state="normal")
+        
+        # Replace the entire group (text + image) with new tag
+        self.journal_text.delete(start, end)
+        new_tag = f"<<IMG:{filename}|{new_width}>>"
+        self.journal_text.insert(start, new_tag)
+        
+        # Re-render immediately
+        self.render_images(clear_refs=False)
+        
+        if was_disabled:
+            self.journal_text.config(state="disabled")
+
+    def delete_image_action(self, group_tag):
+        ranges = self.journal_text.tag_ranges(group_tag)
+        if ranges:
+            was_disabled = self.journal_text.cget("state") == "disabled"
+            self.journal_text.config(state="normal")
+            self.journal_text.delete(ranges[0], ranges[1])
+            if was_disabled:
+                self.journal_text.config(state="disabled") 
 
 def main():
     try:
